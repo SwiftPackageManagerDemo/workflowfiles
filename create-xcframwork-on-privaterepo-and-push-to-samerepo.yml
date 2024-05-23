@@ -1,0 +1,72 @@
+name: Build and Release XCFramework
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          repository: SwiftPackageManagerDemo/Addition
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest'
+
+      - name: Build XCFramework
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -scheme Addition \
+            -destination "generic/platform=iOS" \
+            -archivePath "./build/ios_devices.xcarchive" \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES | xcpretty
+
+          xcodebuild archive \
+            -scheme Addition \
+            -destination "generic/platform=iOS Simulator" \
+            -archivePath "./build/ios_simulators.xcarchive" \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES | xcpretty
+
+          xcodebuild -create-xcframework \
+            -framework "./build/ios_devices.xcarchive/Products/Library/Frameworks/Addition.framework" \
+            -framework "./build/ios_simulators.xcarchive/Products/Library/Frameworks/Addition.framework" \
+            -output "./build/Addition.xcframework"
+
+      - name: Zip XCFramework
+        run: |
+          cd build
+          zip -r Addition.xcframework.zip Addition.xcframework
+
+      - name: Upload XCFramework Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: addition-xcframework
+          path: build/Addition.xcframework.zip
+
+      - name: Download XCFramework Artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: addition-xcframework
+          path: xcframework_artifact
+
+      - name: Move XCFramework to Framework folder
+        run: |
+          mkdir -p Framework
+          mv xcframework_artifact/Addition.xcframework.zip Framework/
+
+      - name: Commit and Push Changes
+        run: |
+          git add Framework/Addition.xcframework.zip
+          git commit -m "Add Addition.xcframework.zip"
+          git push https://github-actions:${{ secrets.GITHUB_TOKEN }}@github.com/SwiftPackageManagerDemo/Addition.git main
