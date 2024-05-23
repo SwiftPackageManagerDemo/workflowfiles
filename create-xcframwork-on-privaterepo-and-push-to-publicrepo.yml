@@ -1,0 +1,100 @@
+name: Build and Release XCFramework
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest'
+
+      - name: Build XCFramework
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -scheme Subtraction \
+            -destination "generic/platform=iOS" \
+            -archivePath "./build/ios_devices.xcarchive" \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES | xcpretty
+
+          xcodebuild archive \
+            -scheme Subtraction \
+            -destination "generic/platform=iOS Simulator" \
+            -archivePath "./build/ios_simulators.xcarchive" \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES | xcpretty
+
+          xcodebuild -create-xcframework \
+            -framework "./build/ios_devices.xcarchive/Products/Library/Frameworks/Subtraction.framework" \
+            -framework "./build/ios_simulators.xcarchive/Products/Library/Frameworks/Subtraction.framework" \
+            -output "./build/Subtraction.xcframework"
+
+      - name: Zip XCFramework
+        run: |
+          cd build
+          zip -r Subtraction.xcframework.zip Subtraction.xcframework
+
+      - name: Upload XCFramework Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: subtraction-xcframework
+          path: build/Subtraction.xcframework.zip
+
+      - name: Download XCFramework Artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: subtraction-xcframework
+          path: xcframework_artifact
+
+      - name: Clone Public Repo
+        run: |
+          git clone https://github.com/SwiftPackageManagerDemo/arithmetic-operations.git
+          cd arithmetic-operations
+          mkdir -p Subtraction
+          mv ../xcframework_artifact/Subtraction.xcframework.zip Subtraction/
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
+        working-directory: arithmetic-operations
+
+      - name: Commit and Push Changes
+        env:
+          PAT: ${{ secrets.PAT }}
+        run: |
+          git add Subtraction/Subtraction.xcframework.zip
+          git commit -m "Update Subtraction.xcframework"
+          git push https://github-actions:${{ secrets.PAT }}@github.com/SwiftPackageManagerDemo/arithmetic-operations.git main
+        working-directory: arithmetic-operations
+
+      # - name: Update Package.swift
+      #   env:
+      #     PAT: ${{ secrets.PAT }}
+      #   run: |
+      #     cd arithmetic-operations  # Make sure this directory contains Package.swift
+      #     checksum=$(swift package compute-checksum Subtraction/Subtraction.xcframework.zip)
+      #     echo "Checksum: $checksum"
+      #     cat package.swift
+      #     sed -i '' "s|url: .*, checksum: .*)|url: \"https://github.com/SwiftPackageManagerDemo/arithmetic-operations/raw/main/Subtraction/Subtraction.xcframework.zip\", checksum: \"$checksum\")|" Package.swift
+      #     # Check if Package.swift has been changed before committing
+      #     if [[ $(git status --porcelain | grep "Package.swift") ]]; then
+      #       git config --global user.email "actions@github.com"
+      #       git config --global user.name "GitHub Actions"
+      #       git add Package.swift
+      #       git commit -m "Update Package.swift with new XCFramework checksum"
+      #       git push https://github-actions:${{ secrets.PAT }}@github.com/SwiftPackageManagerDemo/arithmetic-operations.git main
+      #     else
+      #       echo "No changes to Package.swift. Skipping commit and push."
+      #     fi
