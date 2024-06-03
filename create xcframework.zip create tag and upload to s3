@@ -1,0 +1,125 @@
+name: Build and Release XCFramework
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest'
+
+      - name: Decode and install certificate
+        env:
+          APPLE_DEVELOPER_CERT: ${{ secrets.CERTIFICATE_BASE64 }}
+          APPLE_DEVELOPER_CERT_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$APPLE_DEVELOPER_CERT" | base64 --decode > certificate.p12
+          security create-keychain -p "" build.keychain
+          security import certificate.p12 -t agg -k ~/Library/Keychains/build.keychain -P "$APPLE_DEVELOPER_CERT_PASSWORD" -A
+          security list-keychains -s ~/Library/Keychains/build.keychain
+          security default-keychain -s ~/Library/Keychains/build.keychain
+          security unlock-keychain -p "" ~/Library/Keychains/build.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" ~/Library/Keychains/build.keychain
+
+      - name: Clean Build Folder
+        run: |
+          xcodebuild clean -project SecuredVoiceCallsSDK/SecuredVoiceCallsSDK.xcodeproj -scheme SecuredVoiceCallsSDK -configuration Release
+          
+      - name: Build and Archive iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project SecuredVoiceCallsSDK/SecuredVoiceCallsSDK.xcodeproj \
+            -scheme SecuredVoiceCallsSDK \
+            -destination "generic/platform=iOS Simulator" \
+            -archivePath "./build/ios_simulators.xcarchive" \
+            -configuration Release \
+            -sdk iphonesimulator \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution: EXPERTSTACK PTY LTD" \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES 
+            
+      - name: Build and Archive iOS Devices
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project SecuredVoiceCallsSDK/SecuredVoiceCallsSDK.xcodeproj \
+            -scheme SecuredVoiceCallsSDK \
+            -destination "generic/platform=iOS" \
+            -archivePath "./build/ios_devices.xcarchive" \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution: EXPERTSTACK PTY LTD" \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES 
+            
+      - name: Create XCFramework
+        run: |
+          xcodebuild -create-xcframework \
+            -framework "./build/ios_devices.xcarchive/Products/Library/Frameworks/SecuredVoiceCallsSDK.framework" \
+            -framework "./build/ios_simulators.xcarchive/Products/Library/Frameworks/SecuredVoiceCallsSDK.framework" \
+            -output "./build/SecuredVoiceCallsSDK.xcframework"
+            
+      - name: Get Last Tag
+        id: last_tag
+        run: |
+          # Fetch all tags from the remote repository
+          git fetch --tags
+          LATEST_TAG=$(git tag | sort -V | tail -n 1)
+          # Print the latest tag
+          echo "Latest tag: $LATEST_TAG"
+          echo "LAST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+    
+      - name: Increment Tag
+        id: increment_tag
+        run: |
+          if [ -z "$LAST_TAG" ]; then
+            # If the last tag is empty, set new tag to 1.0.0
+            NEW_TAG="1.0.0"
+          else
+            # Split the last tag into parts
+            tag_parts=($(echo $LAST_TAG | tr '.' ' '))
+            # Increment the patch version
+            patch=$((tag_parts[2] + 1))
+            # Construct the new tag
+            NEW_TAG="${tag_parts[0]}.${tag_parts[1]}.$patch"
+          fi
+          echo "New tag: $NEW_TAG"
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+
+      - name: Create GitHub Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ env.NEW_TAG }}
+          git push origin ${{ env.NEW_TAG }}
+          
+      - name: Zip XCFramework
+        run: |
+          cd build
+          zip -r SecuredVoiceCallsSDK-v${{env.NEW_TAG}}.xcframework.zip SecuredVoiceCallsSDK.xcframework
+          
+      - name: Upload XCFramework Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: SecuredVoiceCallsSDK-xcframework
+          path: build/SecuredVoiceCallsSDK-v${{env.NEW_TAG}}.xcframework.zip
+
+      - name: Upload to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp build/SecuredVoiceCallsSDK-v${{env.NEW_TAG}}.xcframework.zip s3://es-sc-ios-branding-sdk/SecuredVoiceCallsSDK/
